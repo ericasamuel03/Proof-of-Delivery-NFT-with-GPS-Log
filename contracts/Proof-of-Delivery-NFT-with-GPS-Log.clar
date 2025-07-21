@@ -1,0 +1,180 @@
+(define-non-fungible-token delivery-proof uint)
+
+(define-data-var last-token-id uint u0)
+(define-data-var contract-owner principal tx-sender)
+
+(define-map delivery-metadata uint {
+    tracking-number: (string-ascii 32),
+    recipient-address: (string-ascii 256),
+    location-hash: (string-ascii 64),
+    delivery-signature: (string-ascii 128),
+    delivery-timestamp: uint,
+    delivery-company: principal,
+    delivery-status: (string-ascii 16)
+})
+
+(define-map company-authorization principal bool)
+
+(define-constant err-owner-only (err u100))
+(define-constant err-not-token-owner (err u101))
+(define-constant err-not-authorized-company (err u102))
+(define-constant err-token-not-found (err u103))
+(define-constant err-already-delivered (err u104))
+(define-constant err-invalid-status (err u105))
+
+(define-public (get-last-token-id)
+    (ok (var-get last-token-id))
+)
+
+(define-public (get-token-uri (token-id uint))
+    (ok none)
+)
+
+(define-public (get-owner (token-id uint))
+    (ok (nft-get-owner? delivery-proof token-id))
+)
+
+(define-public (transfer (token-id uint) (sender principal) (recipient principal))
+    (begin
+        (asserts! (is-eq tx-sender sender) err-not-token-owner)
+        (nft-transfer? delivery-proof token-id sender recipient)
+    )
+)
+
+(define-public (authorize-company (company principal))
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) err-owner-only)
+        (ok (map-set company-authorization company true))
+    )
+)
+
+(define-public (revoke-company (company principal))
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) err-owner-only)
+        (ok (map-set company-authorization company false))
+    )
+)
+
+(define-public (mint-delivery-proof 
+    (recipient principal)
+    (tracking-number (string-ascii 32))
+    (recipient-address (string-ascii 256))
+    (location-hash (string-ascii 64)))
+    (let
+        (
+            (token-id (+ (var-get last-token-id) u1))
+            (is-authorized (default-to false (map-get? company-authorization tx-sender)))
+        )
+        (asserts! is-authorized err-not-authorized-company)
+        (try! (nft-mint? delivery-proof token-id recipient))
+        (map-set delivery-metadata token-id {
+            tracking-number: tracking-number,
+            recipient-address: recipient-address,
+            location-hash: location-hash,
+            delivery-signature: "",
+            delivery-timestamp: (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1))),
+            delivery-company: tx-sender,
+            delivery-status: "pending"
+        })
+        (var-set last-token-id token-id)
+        (ok token-id)
+    )
+)
+
+(define-public (confirm-delivery 
+    (token-id uint)
+    (delivery-signature (string-ascii 128))
+    (final-location-hash (string-ascii 64)))
+    (let
+        (
+            (metadata (unwrap! (map-get? delivery-metadata token-id) err-token-not-found))
+            (is-authorized (default-to false (map-get? company-authorization tx-sender)))
+        )
+        (asserts! is-authorized err-not-authorized-company)
+        (asserts! (is-eq (get delivery-company metadata) tx-sender) err-not-authorized-company)
+        (asserts! (is-eq (get delivery-status metadata) "pending") err-already-delivered)
+        (map-set delivery-metadata token-id (merge metadata {
+            delivery-signature: delivery-signature,
+            location-hash: final-location-hash,
+            delivery-timestamp: (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1))),
+            delivery-status: "delivered"
+        }))
+        (ok true)
+    )
+)
+
+(define-public (mark-failed-delivery (token-id uint))
+    (let
+        (
+            (metadata (unwrap! (map-get? delivery-metadata token-id) err-token-not-found))
+            (is-authorized (default-to false (map-get? company-authorization tx-sender)))
+        )
+        (asserts! is-authorized err-not-authorized-company)
+        (asserts! (is-eq (get delivery-company metadata) tx-sender) err-not-authorized-company)
+        (asserts! (is-eq (get delivery-status metadata) "pending") err-already-delivered)
+        (map-set delivery-metadata token-id (merge metadata {
+            delivery-timestamp: (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1))),
+            delivery-status: "failed"
+        }))
+        (ok true)
+    )
+)
+
+(define-read-only (get-delivery-metadata (token-id uint))
+    (map-get? delivery-metadata token-id)
+)
+
+(define-read-only (is-company-authorized (company principal))
+    (default-to false (map-get? company-authorization company))
+)
+
+(define-read-only (verify-delivery 
+    (token-id uint)
+    (expected-tracking (string-ascii 32))
+    (expected-address (string-ascii 256)))
+    (match (map-get? delivery-metadata token-id)
+        metadata (and 
+            (is-eq (get tracking-number metadata) expected-tracking)
+            (is-eq (get recipient-address metadata) expected-address)
+            (is-eq (get delivery-status metadata) "delivered")
+        )
+        false
+    )
+)
+
+(define-read-only (get-delivery-status (token-id uint))
+    (match (map-get? delivery-metadata token-id)
+        metadata (some (get delivery-status metadata))
+        none
+    )
+)
+
+(define-read-only (get-delivery-signature (token-id uint))
+    (match (map-get? delivery-metadata token-id)
+        metadata (some (get delivery-signature metadata))
+        none
+    )
+)
+
+(define-read-only (get-location-hash (token-id uint))
+    (match (map-get? delivery-metadata token-id)
+        metadata (some (get location-hash metadata))
+        none
+    )
+)
+
+(define-read-only (get-tracking-number (token-id uint))
+    (match (map-get? delivery-metadata token-id)
+        metadata (some (get tracking-number metadata))
+        none
+    )
+)
+
+(define-read-only (get-delivery-company (token-id uint))
+    (match (map-get? delivery-metadata token-id)
+        metadata (some (get delivery-company metadata))
+        none
+    )
+)
+
+(map-set company-authorization (var-get contract-owner) true)
