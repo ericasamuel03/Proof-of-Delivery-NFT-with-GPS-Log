@@ -178,3 +178,74 @@
 )
 
 (map-set company-authorization (var-get contract-owner) true)
+
+(define-map company-performance principal {
+    total-deliveries: uint,
+    successful-deliveries: uint,
+    failed-deliveries: uint,
+    total-delivery-time: uint,
+    last-updated: uint
+})
+
+(define-constant performance-decimals u10000)
+(define-constant min-deliveries-for-rating u5)
+
+(define-private (update-company-performance-on-delivery (company principal) (success bool) (delivery-time uint))
+    (let
+        (
+            (current-stats (default-to 
+                {total-deliveries: u0, successful-deliveries: u0, failed-deliveries: u0, total-delivery-time: u0, last-updated: u0}
+                (map-get? company-performance company)))
+            (new-total (+ (get total-deliveries current-stats) u1))
+            (new-successful (if success (+ (get successful-deliveries current-stats) u1) (get successful-deliveries current-stats)))
+            (new-failed (if success (get failed-deliveries current-stats) (+ (get failed-deliveries current-stats) u1)))
+            (new-time-total (+ (get total-delivery-time current-stats) delivery-time))
+            (current-time (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1))))
+        )
+        (map-set company-performance company {
+            total-deliveries: new-total,
+            successful-deliveries: new-successful,
+            failed-deliveries: new-failed,
+            total-delivery-time: new-time-total,
+            last-updated: current-time
+        })
+    )
+)
+
+(define-read-only (get-company-success-rate (company principal))
+    (match (map-get? company-performance company)
+        stats (if (> (get total-deliveries stats) u0)
+            (some (/ (* (get successful-deliveries stats) performance-decimals) (get total-deliveries stats)))
+            none)
+        none
+    )
+)
+
+(define-read-only (get-company-reputation-score (company principal))
+    (match (map-get? company-performance company)
+        stats (if (>= (get total-deliveries stats) min-deliveries-for-rating)
+            (let
+                (
+                    (success-rate (/ (* (get successful-deliveries stats) performance-decimals) (get total-deliveries stats)))
+                    (delivery-volume-bonus (if (>= (get total-deliveries stats) u50) u500 u0))
+                    (base-score (+ success-rate delivery-volume-bonus))
+                )
+                (some (if (> base-score performance-decimals) performance-decimals base-score))
+            )
+            none)
+        none
+    )
+)
+
+(define-read-only (get-company-performance-stats (company principal))
+    (map-get? company-performance company)
+)
+
+(define-read-only (get-average-delivery-time (company principal))
+    (match (map-get? company-performance company)
+        stats (if (> (get total-deliveries stats) u0)
+            (some (/ (get total-delivery-time stats) (get total-deliveries stats)))
+            none)
+        none
+    )
+)
