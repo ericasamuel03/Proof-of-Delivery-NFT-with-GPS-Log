@@ -249,3 +249,85 @@
         none
     )
 )
+
+(define-map insurance-pools principal uint)
+(define-map insurance-claims uint {claimant: principal, amount: uint, processed: bool})
+(define-data-var insurance-claim-id uint u0)
+(define-data-var insurance-rate uint u100000)
+(define-data-var max-claim-amount uint u500000)
+
+(define-public (deposit-insurance (amount uint))
+    (let ((current-balance (default-to u0 (map-get? insurance-pools tx-sender))))
+        (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+        (map-set insurance-pools tx-sender (+ current-balance amount))
+        (ok amount)
+    )
+)
+
+(define-public (withdraw-insurance (amount uint))
+    (let ((current-balance (default-to u0 (map-get? insurance-pools tx-sender))))
+        (asserts! (>= current-balance amount) (err u110))
+        (try! (as-contract (stx-transfer? amount tx-sender tx-sender)))
+        (map-set insurance-pools tx-sender (- current-balance amount))
+        (ok amount)
+    )
+)
+
+(define-private (process-insurance-claim (token-id uint) (claim-type (string-ascii 16)))
+    (let (
+        (metadata (unwrap! (map-get? delivery-metadata token-id) (err u103)))
+        (recipient (unwrap! (nft-get-owner? delivery-proof token-id) (err u103)))
+        (company (get delivery-company metadata))
+        (company-balance (default-to u0 (map-get? insurance-pools company)))
+        (claim-amount (if (is-eq claim-type "failed") (var-get max-claim-amount) 
+                     (/ (var-get max-claim-amount) u2)))
+        (actual-payout (if (> claim-amount company-balance) company-balance claim-amount))
+        (new-claim-id (+ (var-get insurance-claim-id) u1))
+    )
+        (if (> actual-payout u0)
+            (begin
+                (try! (as-contract (stx-transfer? actual-payout tx-sender recipient)))
+                (map-set insurance-pools company (- company-balance actual-payout))
+                (map-set insurance-claims new-claim-id {
+                    claimant: recipient, amount: actual-payout, processed: true})
+                (var-set insurance-claim-id new-claim-id)
+                (ok actual-payout)
+            )
+            (ok u0)
+        )
+    )
+)
+
+(define-public (enhanced-confirm-delivery 
+    (token-id uint) (delivery-signature (string-ascii 128)) (final-location-hash (string-ascii 64)))
+    (let ((delivery-result (confirm-delivery token-id delivery-signature final-location-hash)))
+        (match delivery-result
+            success (ok true)
+            error (err error)
+        )
+    )
+)
+
+(define-public (enhanced-mark-failed-delivery (token-id uint))
+    (let ((failure-result (mark-failed-delivery token-id)))
+        (match failure-result
+            success (match (process-insurance-claim token-id "failed")
+                payout-result (ok true)
+                payout-error (ok true)
+            )
+            error (err error)
+        )
+    )
+)
+
+(define-read-only (get-insurance-balance (company principal))
+    (default-to u0 (map-get? insurance-pools company))
+)
+
+(define-read-only (get-claim-details (claim-id uint))
+    (map-get? insurance-claims claim-id)
+)
+
+(define-read-only (calculate-required-insurance (delivery-count uint))
+    (ok (* delivery-count (var-get insurance-rate)))
+)
