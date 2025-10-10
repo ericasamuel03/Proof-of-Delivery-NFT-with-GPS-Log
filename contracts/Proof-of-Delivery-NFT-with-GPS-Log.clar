@@ -331,3 +331,83 @@
 (define-read-only (calculate-required-insurance (delivery-count uint))
     (ok (* delivery-count (var-get insurance-rate)))
 )
+
+
+(define-map delivery-verifiers uint (list 5 principal))
+(define-map verifier-signatures uint (list 5 {verifier: principal, signature: (string-ascii 64), timestamp: uint}))
+(define-map required-verifier-count uint uint)
+(define-constant err-verifier-not-authorized (err u120))
+(define-constant err-already-verified (err u121))
+(define-constant err-insufficient-verifications (err u122))
+(define-constant max-verifiers u5)
+
+(define-public (set-delivery-verifiers (token-id uint) (verifiers (list 5 principal)) (required-count uint))
+    (let ((token-owner (unwrap! (nft-get-owner? delivery-proof token-id) err-token-not-found)))
+        (asserts! (is-eq tx-sender token-owner) err-not-token-owner)
+        (asserts! (and (> required-count u0) (<= required-count (len verifiers))) err-invalid-status)
+        (map-set delivery-verifiers token-id verifiers)
+        (map-set required-verifier-count token-id required-count)
+        (ok true)
+    )
+)
+
+(define-public (sign-verification (token-id uint) (signature (string-ascii 64)))
+    (let (
+        (authorized-verifiers (default-to (list) (map-get? delivery-verifiers token-id)))
+        (current-signatures (default-to (list) (map-get? verifier-signatures token-id)))
+        (current-time (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1))))
+        (already-signed (is-some (index-of? (map get-verifier current-signatures) tx-sender)))
+    )
+        (asserts! (is-some (index-of? authorized-verifiers tx-sender)) err-verifier-not-authorized)
+        (asserts! (not already-signed) err-already-verified)
+        (map-set verifier-signatures token-id 
+            (unwrap-panic (as-max-len? (append current-signatures {verifier: tx-sender, signature: signature, timestamp: current-time}) u5)))
+        (ok true)
+    )
+)
+
+(define-public (finalize-multi-sig-delivery (token-id uint) (final-location-hash (string-ascii 64)))
+    (let (
+        (metadata (unwrap! (map-get? delivery-metadata token-id) err-token-not-found))
+        (signatures (default-to (list) (map-get? verifier-signatures token-id)))
+        (required-count (default-to u1 (map-get? required-verifier-count token-id)))
+        (is-authorized (default-to false (map-get? company-authorization tx-sender)))
+    )
+        (asserts! is-authorized err-not-authorized-company)
+        (asserts! (is-eq (get delivery-company metadata) tx-sender) err-not-authorized-company)
+        (asserts! (>= (len signatures) required-count) err-insufficient-verifications)
+        (asserts! (is-eq (get delivery-status metadata) "pending") err-already-delivered)
+        (map-set delivery-metadata token-id (merge metadata {
+            delivery-signature: (concat-signatures signatures),
+            location-hash: final-location-hash,
+            delivery-timestamp: (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1))),
+            delivery-status: "verified"
+        }))
+        (ok true)
+    )
+)
+
+(define-private (get-verifier (sig-entry {verifier: principal, signature: (string-ascii 64), timestamp: uint}))
+    (get verifier sig-entry)
+)
+
+(define-private (concat-signatures (sigs (list 5 {verifier: principal, signature: (string-ascii 64), timestamp: uint})))
+    (if (> (len sigs) u0) "multi-verified" "")
+)
+
+(define-read-only (get-delivery-verifiers (token-id uint))
+    (map-get? delivery-verifiers token-id)
+)
+
+(define-read-only (get-verification-signatures (token-id uint))
+    (map-get? verifier-signatures token-id)
+)
+
+(define-read-only (check-verification-status (token-id uint))
+    (let (
+        (signatures (default-to (list) (map-get? verifier-signatures token-id)))
+        (required-count (default-to u1 (map-get? required-verifier-count token-id)))
+    )
+        (ok {verified-count: (len signatures), required-count: required-count, is-ready: (>= (len signatures) required-count)})
+    )
+)
