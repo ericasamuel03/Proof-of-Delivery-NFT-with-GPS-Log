@@ -411,3 +411,113 @@
         (ok {verified-count: (len signatures), required-count: required-count, is-ready: (>= (len signatures) required-count)})
     )
 )
+
+
+(define-map disputes uint {
+    token-id: uint,
+    disputer: principal,
+    reason: (string-ascii 256),
+    evidence-hash: (string-ascii 64),
+    status: (string-ascii 16),
+    arbitrator: (optional principal),
+    resolution: (string-ascii 256),
+    created-at: uint,
+    resolved-at: uint
+})
+
+(define-map arbitrators principal {
+    is-active: bool,
+    stake-amount: uint,
+    cases-resolved: uint,
+    reputation-score: uint
+})
+
+(define-data-var dispute-counter uint u0)
+(define-constant min-arbitrator-stake u1000000)
+(define-constant dispute-fee u50000)
+(define-constant err-dispute-exists (err u130))
+(define-constant err-not-arbitrator (err u131))
+(define-constant err-dispute-not-found (err u132))
+(define-constant err-insufficient-stake (err u133))
+
+(define-public (register-arbitrator)
+    (let ((stake-amount min-arbitrator-stake))
+        (try! (stx-transfer? stake-amount tx-sender (as-contract tx-sender)))
+        (map-set arbitrators tx-sender {
+            is-active: true,
+            stake-amount: stake-amount,
+            cases-resolved: u0,
+            reputation-score: u5000
+        })
+        (ok true)
+    )
+)
+
+(define-public (file-dispute (token-id uint) (reason (string-ascii 256)) (evidence-hash (string-ascii 64)))
+    (let (
+        (metadata (unwrap! (map-get? delivery-metadata token-id) err-token-not-found))
+        (token-owner (unwrap! (nft-get-owner? delivery-proof token-id) err-token-not-found))
+        (new-dispute-id (+ (var-get dispute-counter) u1))
+        (current-time (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1))))
+    )
+        (asserts! (is-eq tx-sender token-owner) err-not-token-owner)
+        (try! (stx-transfer? dispute-fee tx-sender (as-contract tx-sender)))
+        (map-set disputes new-dispute-id {
+            token-id: token-id,
+            disputer: tx-sender,
+            reason: reason,
+            evidence-hash: evidence-hash,
+            status: "open",
+            arbitrator: none,
+            resolution: "",
+            created-at: current-time,
+            resolved-at: u0
+        })
+        (var-set dispute-counter new-dispute-id)
+        (ok new-dispute-id)
+    )
+)
+
+(define-public (accept-dispute (dispute-id uint))
+    (let (
+        (dispute (unwrap! (map-get? disputes dispute-id) err-dispute-not-found))
+        (arbitrator-data (unwrap! (map-get? arbitrators tx-sender) err-not-arbitrator))
+    )
+        (asserts! (get is-active arbitrator-data) err-not-arbitrator)
+        (asserts! (is-eq (get status dispute) "open") err-invalid-status)
+        (map-set disputes dispute-id (merge dispute {
+            arbitrator: (some tx-sender),
+            status: "reviewing"
+        }))
+        (ok true)
+    )
+)
+
+(define-public (resolve-dispute (dispute-id uint) (resolution (string-ascii 256)) (ruling-for-disputer bool))
+    (let (
+        (dispute (unwrap! (map-get? disputes dispute-id) err-dispute-not-found))
+        (arbitrator-data (unwrap! (map-get? arbitrators tx-sender) err-not-arbitrator))
+        (current-time (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1))))
+    )
+        (asserts! (is-eq (some tx-sender) (get arbitrator dispute)) err-not-arbitrator)
+        (asserts! (is-eq (get status dispute) "reviewing") err-invalid-status)
+        (map-set disputes dispute-id (merge dispute {
+            status: "resolved",
+            resolution: resolution,
+            resolved-at: current-time
+        }))
+        (map-set arbitrators tx-sender (merge arbitrator-data {
+            cases-resolved: (+ (get cases-resolved arbitrator-data) u1),
+            reputation-score: (+ (get reputation-score arbitrator-data) u100)
+        }))
+        (ok true)
+    )
+)
+
+(define-read-only (get-dispute (dispute-id uint))
+    (map-get? disputes dispute-id)
+)
+
+(define-read-only (get-arbitrator-info (arbitrator principal))
+    (map-get? arbitrators arbitrator)
+)
